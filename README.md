@@ -171,51 +171,20 @@ Interactive docs: **http://localhost:8000/docs**
 docker compose up --build
 ```
 
-- API: http://localhost:8000  
-- UI: http://localhost:8501  
+- API: http://localhost:8000
+- UI: http://localhost:8501
 
 Ensure `.env` exists before `docker compose up`.
 
-## Deployment
-
-### Render
-
-1. Create a **Web Service** from this repo.
-2. **Build command:** `pip install -r requirements.txt`
-3. **Start command:** `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
-4. Add env vars: `OPENAI_API_KEY`, `PYTHONPATH=/opt/render/project/src`
-5. Use a **persistent disk** mounted at `/app/chroma_db` and `/app/data` for vectors and PDFs.
-6. Deploy Streamlit as a second service with `streamlit run frontend/app.py --server.port=$PORT` and `API_URL` pointing to the API service.
-
-### Railway
-
-1. New project → Deploy from GitHub.
-2. Set root directory to `medical-rag`.
-3. Add variables from `.env.example`.
-4. API service start: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
-5. Add a volume for `chroma_db` and `data/medical_pdfs`.
-6. Optional second service for Streamlit frontend.
-
-## Screenshots
-
-After starting Streamlit, you will see:
-
-- Question input and chat interface
-- Answer panel with source document and page
-- Confidence progress bar (similarity score)
-- Sidebar PDF upload and dark mode toggle
-
-*(Add screenshots to `docs/screenshots/` after your first run.)*
-
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENAI_API_KEY` | — | Required for OpenAI provider |
-| `OPENAI_MODEL` | `gpt-3.5-turbo` | Chat model |
-| `LLM_PROVIDER` | `openai` | `openai` or `ollama` |
-| `SIMILARITY_THRESHOLD` | `0.75` | Min cosine similarity to answer |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
+| Variable               | Default            | Description                     |
+| ---------------------- | ------------------ | ------------------------------- |
+| `OPENAI_API_KEY`       | —                  | Required for OpenAI provider    |
+| `OPENAI_MODEL`         | `gpt-3.5-turbo`    | Chat model                      |
+| `LLM_PROVIDER`         | `openai`           | `openai` or `ollama`            |
+| `SIMILARITY_THRESHOLD` | `0.75`             | Min cosine similarity to answer |
+| `EMBEDDING_MODEL`      | `all-MiniLM-L6-v2` | sentence-transformers model     |
 
 ## Future improvements
 
@@ -225,11 +194,3 @@ After starting Streamlit, you will see:
 - Doctor authentication (OAuth2 / JWT)
 - Citation highlighting in PDF viewer
 - Multi-tenant document collections
-
-## Disclaimer
-
-This software is for **educational and decision-support prototyping** only. It is not a substitute for clinical judgment, licensed medical advice, or regulated medical devices. Always verify information against authoritative sources.
-
-## License
-
-MIT (adjust as needed for your organization).
