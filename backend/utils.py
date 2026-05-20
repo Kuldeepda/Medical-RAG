@@ -82,19 +82,17 @@ def filter_relevant_chunks(
     return pool[:max_chunks]
 
 
-def build_extractive_answer(chunks: list[dict[str, Any]], max_chars: int = 1400) -> str:
-    """
-    Build an answer using only retrieved chunk text (no LLM).
-    Safe for hallucination prevention — nothing is invented.
-    """
+def build_extractive_answer(chunks: list[dict[str, Any]], max_chars: int = 2500) -> str:
     parts: list[str] = []
     seen: set[str] = set()
-    for chunk in chunks[:2]:
+    for chunk in chunks[:1]:  # ← changed from 2 to 1
         text = (chunk.get("text") or "").strip()
         if not text or text in seen:
             continue
         seen.add(text)
-        parts.append(text)
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        formatted = "\n".join(lines)
+        parts.append(formatted)
 
     if not parts:
         return UNKNOWN_RESPONSE

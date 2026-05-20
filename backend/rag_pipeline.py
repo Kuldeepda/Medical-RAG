@@ -1,5 +1,6 @@
 """RAG pipeline: retrieve, threshold-filter, and generate grounded answers."""
 
+import re
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +12,7 @@ from backend.config import (
     OLLAMA_BASE_URL,
     OLLAMA_MODEL,
     OPENAI_API_KEY,
+    OPENAI_BASE_URL,
     OPENAI_MODEL,
     SIMILARITY_THRESHOLD,
     TOP_K,
@@ -38,6 +40,10 @@ class MedicalRAGPipeline:
         self.collection = get_or_create_collection()
         self._llm = None
 
+    # ------------------------------------------------------------------
+    # LLM configuration
+    # ------------------------------------------------------------------
+
     def _llm_configured(self) -> bool:
         if LLM_PROVIDER == "ollama":
             return True
@@ -61,9 +67,14 @@ class MedicalRAGPipeline:
             self._llm = ChatOpenAI(
                 model=OPENAI_MODEL,
                 api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL,   # ← Groq endpoint
                 temperature=0,
             )
         return self._llm
+
+    # ------------------------------------------------------------------
+    # Retrieval
+    # ------------------------------------------------------------------
 
     def retrieve(self, question: str, top_k: int = TOP_K) -> list[dict[str, Any]]:
         """Query ChromaDB and return chunks with similarity scores."""
@@ -93,7 +104,21 @@ class MedicalRAGPipeline:
             )
 
         chunks.sort(key=lambda c: c["similarity"], reverse=True)
+
+        # Log scores for debugging
+        for c in chunks:
+            logger.info(
+                "Retrieved chunk | score=%.3f | source=%s | preview=%s",
+                c["similarity"],
+                c["metadata"].get("source", "unknown"),
+                c["text"][:80].replace("\n", " "),
+            )
+
         return chunks
+
+    # ------------------------------------------------------------------
+    # Response builders
+    # ------------------------------------------------------------------
 
     def _unknown_response(
         self, question: str, reason: str = "insufficient_context"
@@ -175,10 +200,78 @@ class MedicalRAGPipeline:
             notice=self._extractive_notice(reason),
         )
 
+    # ------------------------------------------------------------------
+    # Trim chunk text to only the relevant topic section
+    # ------------------------------------------------------------------
+
+    def _trim_chunk_to_topic(self, chunk_text: str, question: str) -> str:
+        """
+        If a chunk contains multiple disease sections (e.g. ASTHMA + HYPERTENSION),
+        extract only the section relevant to the question.
+        NOTE: FEVER excluded from markers — it appears mid-text and causes bad splits.
+        """
+        question_lower = question.lower()
+
+        # FEVER intentionally excluded to avoid mid-text splitting
+        section_markers = [
+            "ASTHMA", "HYPERTENSION", "DIABETES",
+            "PNEUMONIA", "COVID", "CANCER", "ARTHRITIS",
+        ]
+
+        # Find which topic the question is about
+        target_section = None
+        for marker in section_markers:
+            if marker.lower() in question_lower:
+                target_section = marker
+                break
+
+        if not target_section:
+            return chunk_text  # Can't determine topic, return full text
+
+        # Split text by section markers
+        pattern = "|".join(re.escape(m) for m in section_markers)
+        parts = re.split(rf"\b({pattern})\b", chunk_text, flags=re.IGNORECASE)
+
+        # Reconstruct sections as {header: content}
+        sections: dict[str, str] = {}
+        i = 0
+        while i < len(parts):
+            part = parts[i].strip()
+            if part.upper() in [m.upper() for m in section_markers]:
+                header = part.upper()
+                content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                sections[header] = content
+                i += 2
+            else:
+                i += 1
+
+        # Return only the target section
+        for header, content in sections.items():
+            if target_section.upper() == header:
+                trimmed = f"{header}\n{content}"
+                # Safety: if trimmed text too short, return original
+                if len(trimmed.strip()) < 100:
+                    logger.warning(
+                        "Trimmed text too short (%d chars), keeping original chunk",
+                        len(trimmed.strip()),
+                    )
+                    return chunk_text
+                return trimmed
+
+        return chunk_text  # Fallback to full text
+
+    # ------------------------------------------------------------------
+    # Main pipeline
+    # ------------------------------------------------------------------
+
     def generate_answer(self, question: str) -> dict[str, Any]:
         """
-        Full RAG flow with similarity threshold and strict prompting.
-        Falls back to extractive (document-only) answers when LLM is unavailable.
+        Full RAG flow:
+        1. Sanitize & normalize question
+        2. Retrieve top-K chunks from ChromaDB
+        3. Filter by similarity threshold
+        4. Trim chunks to relevant topic section (prevents topic bleeding)
+        5. Generate structured answer via LLM or extractive fallback
         """
         question = sanitize_question(question)
         if not question:
@@ -188,24 +281,36 @@ class MedicalRAGPipeline:
         if search_query != question.lower():
             logger.info("Query normalized: %r -> %r", question, search_query)
 
+        # Step 1: Retrieve
         chunks = self.retrieve(search_query)
         if not chunks:
             return self._unknown_response(question, reason="no_chunks")
 
+        # Step 2: Threshold check
         best_score = chunks[0]["similarity"]
         if best_score < SIMILARITY_THRESHOLD:
             logger.info(
-                "Best similarity %.3f below threshold %.3f",
+                "Best similarity %.3f below threshold %.3f — rejecting",
                 best_score,
                 SIMILARITY_THRESHOLD,
             )
             return self._unknown_response(question, reason="low_similarity")
 
-        chunks = filter_relevant_chunks(chunks, SIMILARITY_THRESHOLD, max_chunks=2)
+        # Step 3: Filter to relevant chunks only (max 1 to avoid topic bleeding)
+        chunks = filter_relevant_chunks(chunks, SIMILARITY_THRESHOLD, max_chunks=1)
         if not chunks:
             return self._unknown_response(question, reason="low_similarity")
 
-        # No API key: use document excerpts instead of falsely saying "I don't know"
+        # Step 4: Trim chunk to relevant topic section only
+        for chunk in chunks:
+            chunk["text"] = self._trim_chunk_to_topic(chunk["text"], question)
+            logger.info(
+                "Trimmed chunk | source=%s | preview=%s",
+                chunk["metadata"].get("source", "unknown"),
+                chunk["text"][:100].replace("\n", " "),
+            )
+
+        # Step 5: Extractive fallback if LLM not configured
         if USE_EXTRACTIVE_FALLBACK and not self._llm_configured():
             logger.warning(
                 "LLM not configured; using extractive fallback (score=%.3f)",
@@ -213,6 +318,7 @@ class MedicalRAGPipeline:
             )
             return self._extractive_response(question, chunks, reason="no_key")
 
+        # Step 6: Build prompt and call LLM
         context = format_context_block(chunks)
         user_prompt = build_user_prompt(context, question)
 
@@ -227,6 +333,7 @@ class MedicalRAGPipeline:
             answer_text = (
                 response.content if hasattr(response, "content") else str(response)
             )
+            logger.info("LLM answer generated successfully via %s", LLM_PROVIDER)
         except Exception as exc:
             logger.exception("LLM generation failed: %s", exc)
             if USE_EXTRACTIVE_FALLBACK:
@@ -238,6 +345,10 @@ class MedicalRAGPipeline:
 
         return self._grounded_response(question, chunks, answer_text, mode="llm")
 
+
+# ------------------------------------------------------------------
+# Singleton
+# ------------------------------------------------------------------
 
 _pipeline: Optional[MedicalRAGPipeline] = None
 
